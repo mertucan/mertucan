@@ -445,7 +445,7 @@ def update_svg(filename, values):
     justify_format(root, "star_data", values["star_data"], 14)
     justify_format(root, "commit_data", values["commit_data"], 22)
     justify_format(root, "follower_data", values["follower_data"], 10)
-    justify_format(root, "loc_data", values["loc_data"], 10)
+    justify_format(root, "loc_data", values["loc_data"], 11)
     justify_format(root, "loc_add", values["loc_add"])
     justify_format(root, "loc_del", values["loc_del"])
 
