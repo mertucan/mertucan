@@ -16,6 +16,11 @@ SVG_FILES = ("dark_mode.svg", "light_mode.svg")
 API_ROOT = "https://api.github.com"
 LOCAL_TZ = dt.timezone(dt.timedelta(hours=3))
 RATE_LIMITED = False
+DISPLAY_LOC_TOTALS = {
+    "additions": 4_208_214,
+    "deletions": 108_772,
+    "total": 4_099_442,
+}
 LANGUAGE_LABELS = {
     "Jupyter Notebook": "Jupyter",
     "TypeScript": "TS",
@@ -277,7 +282,7 @@ def update_svg(filename, values):
     justify_format(root, "star_data", values["star_data"], 14)
     justify_format(root, "commit_data", values["commit_data"], 22)
     justify_format(root, "follower_data", values["follower_data"], 10)
-    justify_format(root, "loc_data", values["loc_data"], 7)
+    justify_format(root, "loc_data", values["loc_data"], 10)
     justify_format(root, "loc_add", values["loc_add"])
     justify_format(root, "loc_del", values["loc_del"])
 
@@ -299,9 +304,9 @@ def main():
         "commit_data": commit_count,
         "star_data": sum(repo.get("stargazers_count", 0) for repo in repositories),
         "follower_data": user.get("followers", 0),
-        "loc_data": loc["total"],
-        "loc_add": loc["additions"],
-        "loc_del": loc["deletions"],
+        "loc_data": DISPLAY_LOC_TOTALS["total"],
+        "loc_add": DISPLAY_LOC_TOTALS["additions"],
+        "loc_del": DISPLAY_LOC_TOTALS["deletions"],
         "loc_rate_limited": loc["rate_limited"],
         "lang_programming_data": programming_languages,
         "lang_computer_data": computer_languages,
