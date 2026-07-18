@@ -21,6 +21,67 @@ LANGUAGE_LABELS = {
     "TypeScript": "TS",
     "JavaScript": "JS",
 }
+EXCLUDED_LOC_DIRS = {
+    ".git",
+    ".next",
+    ".nuxt",
+    ".parcel-cache",
+    ".svelte-kit",
+    ".venv",
+    "__pycache__",
+    "bin",
+    "bower_components",
+    "build",
+    "coverage",
+    "debug",
+    "dist",
+    "generated",
+    "node_modules",
+    "obj",
+    "out",
+    "release",
+    "target",
+    "vendor",
+}
+EXCLUDED_LOC_FILENAMES = {
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "poetry.lock",
+    "pipfile.lock",
+    "composer.lock",
+    "cargo.lock",
+}
+EXCLUDED_LOC_EXTENSIONS = {
+    ".7z",
+    ".avif",
+    ".bmp",
+    ".csv",
+    ".db",
+    ".dll",
+    ".doc",
+    ".docx",
+    ".exe",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".ipynb",
+    ".jar",
+    ".jpeg",
+    ".jpg",
+    ".lock",
+    ".log",
+    ".mp3",
+    ".mp4",
+    ".pdf",
+    ".png",
+    ".sqlite",
+    ".svg",
+    ".tsv",
+    ".webp",
+    ".xlsx",
+    ".zip",
+}
 
 
 def api_get(path, query=None, accept="application/vnd.github+json", use_token=True):
@@ -312,6 +373,40 @@ def commit_count_this_year():
     return data.get("total_count", 0) if isinstance(data, dict) else 0
 
 
+def is_counted_loc_file(filename):
+    normalized = filename.replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    if name in EXCLUDED_LOC_FILENAMES:
+        return False
+    if name.endswith(".min.js") or name.endswith(".min.css"):
+        return False
+
+    parts = normalized.split("/")
+    if any(part in EXCLUDED_LOC_DIRS for part in parts[:-1]):
+        return False
+
+    extension = ""
+    if "." in name:
+        extension = "." + name.rsplit(".", 1)[-1]
+    return extension not in EXCLUDED_LOC_EXTENSIONS
+
+
+def filtered_commit_stats(owner, repo, sha):
+    detail = safe_api_get(
+        f"/repos/{owner}/{repo}/commits/{sha}",
+        default={},
+        retry_public=True,
+    )
+    additions = 0
+    deletions = 0
+    files = detail.get("files", []) if isinstance(detail, dict) else []
+    for file_info in files:
+        if is_counted_loc_file(file_info.get("filename", "")):
+            additions += file_info.get("additions", 0)
+            deletions += file_info.get("deletions", 0)
+    return additions, deletions
+
+
 def repo_commit_stats(owner, repo, author_id):
     additions = 0
     deletions = 0
@@ -325,8 +420,7 @@ def repo_commit_stats(owner, repo, author_id):
             ... on Commit {
               history(first: 100, after: $cursor, author: {id: $authorId}) {
                 nodes {
-                  additions
-                  deletions
+                  oid
                 }
                 pageInfo {
                   hasNextPage
@@ -351,9 +445,14 @@ def repo_commit_stats(owner, repo, author_id):
         history = target.get("history") or {}
         nodes = history.get("nodes") or []
         for commit in nodes:
-            additions += commit.get("additions", 0)
-            deletions += commit.get("deletions", 0)
+            sha = commit.get("oid")
+            if not sha:
+                continue
+            commit_additions, commit_deletions = filtered_commit_stats(owner, repo, sha)
+            additions += commit_additions
+            deletions += commit_deletions
             commit_total += 1
+            time.sleep(0.08)
 
         page_info = history.get("pageInfo") or {}
         if not page_info.get("hasNextPage"):
