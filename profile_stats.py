@@ -16,11 +16,6 @@ SVG_FILES = ("dark_mode.svg", "light_mode.svg")
 API_ROOT = "https://api.github.com"
 LOCAL_TZ = dt.timezone(dt.timedelta(hours=3))
 RATE_LIMITED = False
-DISPLAY_LOC_TOTALS = {
-    "additions": 4_208_214,
-    "deletions": 108_772,
-    "total": 4_099_442,
-}
 LANGUAGE_LABELS = {
     "Jupyter Notebook": "Jupyter",
     "TypeScript": "TS",
@@ -50,6 +45,31 @@ def api_get(path, query=None, accept="application/vnd.github+json", use_token=Tr
         raise RuntimeError(f"GitHub API returned {error.code} for {path}: {detail}") from error
 
 
+def api_post(path, payload, accept="application/vnd.github+json"):
+    url = f"{API_ROOT}{path}"
+    headers = {
+        "Accept": accept,
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": f"{USER_NAME}-profile-readme",
+    }
+    if TOKEN:
+        headers["Authorization"] = f"Bearer {TOKEN}"
+
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, headers=headers, data=data, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"GitHub API returned {error.code} for {path}: {detail}") from error
+
+    if result.get("errors"):
+        raise RuntimeError(f"GitHub GraphQL returned errors: {result['errors']}")
+    return result.get("data", {})
+
+
 def safe_api_get(path, query=None, default=None, accept="application/vnd.github+json", retry_public=False):
     global RATE_LIMITED
     try:
@@ -66,6 +86,18 @@ def safe_api_get(path, query=None, default=None, accept="application/vnd.github+
                 if "rate limit" in retry_message or "abuse detection" in retry_message:
                     RATE_LIMITED = True
                 print(f"warning: {retry_exc}", file=sys.stderr)
+        print(f"warning: {exc}", file=sys.stderr)
+        return default
+
+
+def safe_api_post(path, payload, default=None, accept="application/vnd.github+json"):
+    global RATE_LIMITED
+    try:
+        return api_post(path, payload, accept=accept)
+    except Exception as exc:
+        message = str(exc).lower()
+        if "rate limit" in message or "abuse detection" in message:
+            RATE_LIMITED = True
         print(f"warning: {exc}", file=sys.stderr)
         return default
 
@@ -155,6 +187,115 @@ def public_repositories():
         page += 1
 
 
+def normalize_repo(repo):
+    owner = repo.get("owner")
+    owner_login = owner.get("login") if isinstance(owner, dict) else None
+    language = repo.get("language")
+    if isinstance(repo.get("primaryLanguage"), dict):
+        language = repo["primaryLanguage"].get("name")
+
+    full_name = repo.get("full_name") or repo.get("nameWithOwner")
+    if not full_name and owner_login and repo.get("name"):
+        full_name = f"{owner_login}/{repo['name']}"
+
+    return {
+        "full_name": full_name,
+        "fork": bool(repo.get("fork") or repo.get("isFork")),
+        "language": language,
+        "stargazers_count": repo.get("stargazers_count", repo.get("stargazerCount", 0)),
+        "owner_login": owner_login or (full_name.split("/", 1)[0] if full_name and "/" in full_name else ""),
+    }
+
+
+def merge_repositories(*repo_groups):
+    repositories = {}
+    for repo_group in repo_groups:
+        for repo in repo_group:
+            normalized = normalize_repo(repo)
+            full_name = normalized.get("full_name")
+            if full_name:
+                repositories[full_name] = normalized
+    return list(repositories.values())
+
+
+def accessible_repositories():
+    if not TOKEN:
+        return [normalize_repo(repo) for repo in public_repositories()]
+
+    repos = []
+    page = 1
+    while True:
+        batch = safe_api_get(
+            "/user/repos",
+            {
+                "affiliation": "owner,collaborator,organization_member",
+                "visibility": "all",
+                "sort": "updated",
+                "direction": "desc",
+                "per_page": 100,
+                "page": page,
+            },
+            default=[],
+        )
+        if not batch:
+            break
+        repos.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+
+    return merge_repositories(repos) or [normalize_repo(repo) for repo in public_repositories()]
+
+
+def repositories_contributed_to():
+    if not TOKEN:
+        return []
+
+    query = """
+    query($login: String!, $cursor: String) {
+      user(login: $login) {
+        repositoriesContributedTo(
+          first: 100
+          after: $cursor
+          includeUserRepositories: false
+          contributionTypes: [COMMIT, PULL_REQUEST, REPOSITORY]
+        ) {
+          nodes {
+            name
+            nameWithOwner
+            isFork
+            stargazerCount
+            primaryLanguage {
+              name
+            }
+            owner {
+              login
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    }
+    """
+
+    repos = []
+    cursor = None
+    while True:
+        data = safe_api_post("/graphql", {"query": query, "variables": {"login": USER_NAME, "cursor": cursor}}, default={})
+        connection = data.get("user", {}).get("repositoriesContributedTo", {}) if isinstance(data, dict) else {}
+        nodes = connection.get("nodes") or []
+        repos.extend(nodes)
+        page_info = connection.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+
+    return merge_repositories(repos)
+
+
 def commit_count_this_year():
     now = dt.datetime.now(dt.timezone.utc)
     year_start = dt.datetime(now.year, 1, 1, tzinfo=dt.timezone.utc).date().isoformat()
@@ -195,8 +336,6 @@ def loc_totals(repositories):
     commit_total = 0
 
     for repo in repositories:
-        if repo.get("fork"):
-            continue
         full_name = repo.get("full_name", "")
         if "/" not in full_name:
             continue
@@ -292,21 +431,24 @@ def update_svg(filename, values):
 def main():
     now = dt.datetime.now(LOCAL_TZ)
     user = api_get(f"/users/{USER_NAME}")
-    repositories = public_repositories()
+    accessible = accessible_repositories()
+    contributed = repositories_contributed_to()
+    repositories = merge_repositories(accessible, contributed)
+    owned_repositories = [repo for repo in repositories if repo.get("owner_login", "").lower() == USER_NAME.lower()]
     programming_languages, computer_languages = grouped_languages(repositories)
     loc = loc_totals(repositories)
     commit_count = max(loc["commits"], commit_count_this_year())
 
     values = {
         "age_data": account_age(user["created_at"]),
-        "repo_data": TOTAL_REPOSITORIES,
-        "contrib_data": user.get("public_repos", len(repositories)),
+        "repo_data": max(TOTAL_REPOSITORIES, len(owned_repositories)),
+        "contrib_data": len(repositories),
         "commit_data": commit_count,
-        "star_data": sum(repo.get("stargazers_count", 0) for repo in repositories),
+        "star_data": sum(repo.get("stargazers_count", 0) for repo in owned_repositories),
         "follower_data": user.get("followers", 0),
-        "loc_data": DISPLAY_LOC_TOTALS["total"],
-        "loc_add": DISPLAY_LOC_TOTALS["additions"],
-        "loc_del": DISPLAY_LOC_TOTALS["deletions"],
+        "loc_data": loc["total"],
+        "loc_add": loc["additions"],
+        "loc_del": loc["deletions"],
         "loc_rate_limited": loc["rate_limited"],
         "lang_programming_data": programming_languages,
         "lang_computer_data": computer_languages,
