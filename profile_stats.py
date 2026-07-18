@@ -119,8 +119,9 @@ def grouped_languages(repositories):
 
     if not programming:
         programming = sorted_names[:4]
-    if not computer:
-        computer = ["HTML", "CSS", "JSON", "YAML"]
+    for preferred_language in ("HTML", "CSS", "JSON"):
+        if preferred_language not in computer:
+            computer.append(preferred_language)
 
     programming = [LANGUAGE_LABELS.get(name, name) for name in programming[:4]]
     computer = [LANGUAGE_LABELS.get(name, name) for name in computer[:5]]
