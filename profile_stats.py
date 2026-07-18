@@ -312,25 +312,59 @@ def commit_count_this_year():
     return data.get("total_count", 0) if isinstance(data, dict) else 0
 
 
-def repo_commits(owner, repo):
-    commits = []
-    page = 1
+def repo_commit_stats(owner, repo, author_id):
+    additions = 0
+    deletions = 0
+    commit_total = 0
+    cursor = None
+    query = """
+    query($owner: String!, $name: String!, $authorId: ID!, $cursor: String) {
+      repository(owner: $owner, name: $name) {
+        defaultBranchRef {
+          target {
+            ... on Commit {
+              history(first: 100, after: $cursor, author: {id: $authorId}) {
+                nodes {
+                  additions
+                  deletions
+                }
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
     while True:
-        batch = safe_api_get(
-            f"/repos/{owner}/{repo}/commits",
-            {"author": USER_NAME, "per_page": 100, "page": page},
-            default=[],
-            retry_public=True,
+        data = safe_api_post(
+            "/graphql",
+            {"query": query, "variables": {"owner": owner, "name": repo, "authorId": author_id, "cursor": cursor}},
+            default={},
         )
-        if not batch:
-            return commits
-        commits.extend(batch)
-        if len(batch) < 100:
-            return commits
-        page += 1
+        repository = data.get("repository") if isinstance(data, dict) else None
+        target = (((repository or {}).get("defaultBranchRef") or {}).get("target") or {})
+        history = target.get("history") or {}
+        nodes = history.get("nodes") or []
+        for commit in nodes:
+            additions += commit.get("additions", 0)
+            deletions += commit.get("deletions", 0)
+            commit_total += 1
+
+        page_info = history.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        time.sleep(0.08)
+
+    return additions, deletions, commit_total
 
 
-def loc_totals(repositories):
+def loc_totals(repositories, author_id):
     additions = 0
     deletions = 0
     commit_total = 0
@@ -341,20 +375,10 @@ def loc_totals(repositories):
             continue
 
         owner, repo_name = full_name.split("/", 1)
-        for commit in repo_commits(owner, repo_name):
-            sha = commit.get("sha")
-            if not sha:
-                continue
-            detail = safe_api_get(
-                f"/repos/{owner}/{repo_name}/commits/{sha}",
-                default={},
-                retry_public=True,
-            )
-            stats = detail.get("stats", {}) if isinstance(detail, dict) else {}
-            additions += stats.get("additions", 0)
-            deletions += stats.get("deletions", 0)
-            commit_total += 1
-            time.sleep(0.12)
+        repo_additions, repo_deletions, repo_commits = repo_commit_stats(owner, repo_name, author_id)
+        additions += repo_additions
+        deletions += repo_deletions
+        commit_total += repo_commits
 
     return {
         "additions": additions,
@@ -431,12 +455,13 @@ def update_svg(filename, values):
 def main():
     now = dt.datetime.now(LOCAL_TZ)
     user = api_get(f"/users/{USER_NAME}")
+    author_id = user.get("node_id")
     accessible = accessible_repositories()
     contributed = repositories_contributed_to()
     repositories = merge_repositories(accessible, contributed)
     owned_repositories = [repo for repo in repositories if repo.get("owner_login", "").lower() == USER_NAME.lower()]
     programming_languages, computer_languages = grouped_languages(repositories)
-    loc = loc_totals(repositories)
+    loc = loc_totals(repositories, author_id)
     commit_count = max(loc["commits"], commit_count_this_year())
 
     values = {
